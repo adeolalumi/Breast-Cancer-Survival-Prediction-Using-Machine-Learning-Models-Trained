@@ -1,6 +1,6 @@
 ---
 title: "Cluster_Analysis"
-author: "Adeola Odunewu 2225757"
+author: "Adeola Odunewu"
 date: "`r Sys.Date()`"
 output: html_document
 ---

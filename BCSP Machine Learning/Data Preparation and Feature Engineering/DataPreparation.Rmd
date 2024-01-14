@@ -1,0 +1,631 @@
+---
+title: "Predicting_Survival"
+author: "Adeola Odunewu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+#This function is used in R to read CSV (Comma Separated Values) files.
+data = read.csv("METABRIC_RNA_Mutation.csv", stringsAsFactors = FALSE)
+```
+
+
+
+```{r}
+#This libraries will be used for feature engineering, feature selection, and modeling:
+#Feature tools: This library is designed for deep feature creation from any features we have, especially from temporal and relation features. 
+
+library(tidyverse)
+library(ggplot2)
+library(survival)
+library(corrplot)
+library(dplyr)
+library(readr)
+library(stringr)
+library(gridExtra)
+library(car)
+library(cluster)
+library(reshape2)
+library(Hmisc)
+library(dbscan)
+library(DescTools)
+library(stats)
+library(factoextra)
+library(FactoMineR)
+library(fpc)
+library(igraph)
+library(plotly)
+library(caret)
+library(kableExtra)
+```
+
+#Exploratory Data Analysis (EDA) 
+
+```{r}
+#This function takes the dataset (data) and creates histograms for the numerical columns in the dataset using the ggplot2 library.
+
+# Set a seed for reproducibility
+set.seed(123)
+
+plot_numerical_variables <- function(data, num_cols = 30, cols_per_row = 3) {
+  numeric_cols <- names(data)[sapply(data, is.numeric)]
+  
+  numeric_plots <- lapply(numeric_cols[1:min(num_cols, length(numeric_cols))], function(col) {
+    ggplot(data, aes(x = .data[[col]])) +
+      geom_histogram(binwidth = 0.3) +
+      labs(title = col) +
+      theme_minimal()
+  })
+  
+  num_rows <- ceiling(length(numeric_plots) / cols_per_row)
+  
+  plots_list <- split(numeric_plots, rep(1:num_rows, each = cols_per_row, length.out = length(numeric_plots)))
+  
+  for (i in seq_along(plots_list)) {
+    gridExtra::grid.arrange(
+      grobs = plots_list[[i]],
+      ncol = cols_per_row
+    )
+  }
+}
+
+# Example usage:
+plot_numerical_variables(data)
+
+
+```
+
+
+```{r}
+# validate the volume of numeric data. Please the False index are categorical
+ingra_component <- sapply(data,is.numeric)
+summary(ingra_component)
+
+```
+#Note we assume False are categorical data. 
+
+
+```{r}
+# Summary of  interest variables
+
+# List of variables of interest
+variables_of_interest <- c(
+  "patient_id", "age_at_diagnosis", "type_of_breast_surgery", "cancer_type",
+  "cancer_type_detailed", "cellularity", "chemotherapy", 
+  "pam50_._claudin.low_subtype", "cohort", "er_status_measured_by_ihc", 
+  "er_status", "neoplasm_histologic_grade", "her2_status_measured_by_snp6", 
+  "her2_status", "tumor_other_histologic_subtype", "hormone_therapy", 
+  "inferred_menopausal_state", "integrative_cluster", 
+  "primary_tumor_laterality", "lymph_nodes_examined_positive", 
+  "mutation_count", "nottingham_prognostic_index", "oncotree_code", 
+  "overall_survival_months", "overall_survival", "pr_status", 
+  "radio_therapy", "X3.gene_classifier_subtype", "tumor_size", 
+  "tumor_stage", "death_from_cancer", "brca1"
+)
+
+# Subset the data with the selected variables
+selected_data <- data[, variables_of_interest]
+
+# Generate summary statistics
+summary_stats <- summary(selected_data)
+print(summary_stats)
+
+
+```
+
+```{r}
+#Understanding survival month mean
+summary(data$overall_survival_months)
+```
+
+
+
+```{r}
+#Validating missing data
+missing_data <- anyNA(data)
+missing_data
+na_data <- sum(is.na(data))
+na_data
+```
+
+#Feature Engineering 
+
+```{r} 
+#Handling Missing Values: Decided on to handle missing data, by imputing values.
+# Identifying all the Na in the dataset and replace it with the mean.
+numeric_vars <- sapply(data,is.numeric)
+for (col in names(data)[numeric_vars]) {
+  na_indices <- is.na(data[[col]])
+  data[na_indices, col]<-mean(data[[col]], na.rm = TRUE)}
+```
+
+
+```{r}
+# Validating the present of Na in the data set
+if_any_Na <- anyNA(data)
+if_any_Na
+na_data_present <- sum(is.na(data))
+na_data_present
+```
+
+
+```{r}
+# Identify columns to be converted to factors
+factor_cols <- sapply(data, function(x) is.character(x))
+
+# Convert identified columns to factors
+data[factor_cols] <- lapply(data[factor_cols], as.factor)
+
+```
+
+```{r}
+#Taking care of ordinal varaible to factors
+# Iterate over each column in the dataset
+for (col in names(data)) {
+  # Check if the column is a factor and has more than two levels
+  if (is.ordered(data[[col]]) && length(levels(data[[col]])) > 2) {
+    # Convert the ordinal variable to a factor with default levels and labels
+    data[[col]] <- factor(data[[col]])
+  }
+}
+
+```
+
+
+```{r}
+# Collecting numerical data, and the code remove patient_id since is not so important to this study
+numeric_data <- data %>%
+  select(-patient_id) %>%
+  select_if(is.numeric)
+
+numeric_data
+```
+
+
+```{r}
+#Removing duplicate
+numeric_data_cleaned <- unique(numeric_data)
+```
+
+
+```{r}
+#Number of variable in the numerical Dataset & the view of Numerical data
+print("Numerical Data")
+dim(numeric_data_cleaned)
+
+```
+#Feature Selection
+
+```{r}
+# Calculate the correlation matrix
+cor_matrix <- cor(numeric_data_cleaned)
+
+# Get the names of the variables
+var_names <- names(numeric_data_cleaned)
+
+# Load necessary libraries
+library(plotly)
+
+# Create an interactive heatmap plot with correlation values using plotly
+heatmap_plot <- plot_ly(
+  x = var_names,
+  y = var_names,
+  z = cor_matrix,
+  colorscale = "RdYlBu",
+  type = "heatmap"
+) %>% 
+layout(
+  title = "Correlation Matrix",
+  xaxis = list(title = "Variables"),
+  yaxis = list(title = "Variables")
+)
+
+# Display the interactive heatmap plot
+heatmap_plot
+
+
+
+```
+
+```{r}
+view(cor_matrix)
+```
+
+
+#The positive correlation coefficient of approximately 0.0413 indicates that there is a very weak positive relationship between overall_survival_months and mutation. mutation_count is likely to play more substantial roles in determining overall survival.  This is because mutation_count is a measure of the number of mutations that a patient has, and it is well-known that the more mutations a patient has, the lower their overall survival rate is likely to be.
+
+#the correlation coefficient of approximately 0.0024 suggests that there is almost no meaningful linear relationship between the "brca1" gene and overall survival time in months. While  the correlation coefficient of 0.124 suggests that there is a weak to moderate positive association between the "pten" gene and overall survival time in months.
+
+#When the variables "mutation_count," "pten," and "brca1" and others show a positive relationship with "overall_survival_months," it implies that higher values of these variables are associated with longer overall survival times.
+
+```{r}
+# Measuring multicollinearity with Overall Survival.
+#VIF (Variance Inflation Factor) is a measure used to assess multicollinearity in regression analysis. 
+
+formular <- overall_survival_months ~ . 
+
+model <- lm(formular, data = numeric_data_cleaned)
+modl = vif(model)
+view(modl)
+```
+
+
+
+```{r}
+# Calculate VIF for the model
+vif_values <- vif(model)
+
+# Identify variables with VIF greater than 10
+vif_greater_than_10 <- names(vif_values[vif_values > 10])
+
+# Identify variables with VIF less than 10
+vif_less_than_10 <- names(vif_values[vif_values < 10])
+```
+
+
+```{r}
+# View the variables with VIF less than 10
+vif_less_than_10
+```
+
+
+```{r}
+# View the variables with VIF greater than 10
+vif_greater_than_10
+```
+
+
+```{r}
+# Remove variables with VIF that is greater than 10 from the dataset and rename to numeric_data_cleaned_4_analysis
+numeric_data_cleaned_4_analysis <- numeric_data_cleaned[, !names(numeric_data_cleaned) %in% vif_greater_than_10]
+
+```
+#The Variance Inflation Factor (VIF) is a measure used to detect multicollinearity in regression analysis. VIF values below 5 are often considered acceptable, while values above 10 are often considered problematic.  CFI Team (2020) (https://corporatefinanceinstitute.com/resources/data-science/variance-inflation-factor-vif/)
+
+```{r}
+#Validating the dimension of the subset numeric_data_cleaned_4_analysis & numeric_data_cleaned
+dim(numeric_data_cleaned_4_analysis)
+dim(numeric_data_cleaned)
+```
+
+```{r}
+# Dealing with outliers based on Z-scores
+remove_outliers <- function(numeric_data_cleaned_4_analysis, overall_survival_months, z_thresh = 20) {
+  # Calculate Z-scores for all columns except the target_column
+  z_scores <- apply(numeric_data_cleaned_4_analysis[, -which(names(numeric_data_cleaned_4_analysis) == overall_survival_months), drop = FALSE], 2, function(x) abs((x - mean(x)) / sd(x)))
+  
+  # Keep rows where all Z-scores are less than z_thresh
+  data_without_outliers <- numeric_data_cleaned_4_analysis[apply(z_scores, 1, function(row) all(row < z_thresh)), ]
+  
+  return(data_without_outliers)
+}
+# Assuming your data is stored in a data frame called 'data_frame', and the target column is 'overall_survival_months'
+data_cleaned <- remove_outliers(numeric_data_cleaned_4_analysis, 'overall_survival_months')
+
+# Print the cleaned data
+dim(data_cleaned)
+
+```
+#The goal of this analysis is to identify extreme value. As the data seems normally distributed, the use of threshold 20 might be appropriate.
+#The code defines a function 'remove_outliers' that removes outliers from a dataset based on Z-scores. It calculates Z-scores for all columns except the target variable 'overall_survival_months', and then keeps rows where all Z-scores are less than a threshold of 10. The resulting dataset 'data_cleaned' contains the rows with outliers removed. It's important to choose an conservative threshold based on data distribution.
+
+```{r}
+# Perform PCA
+pca_result <- prcomp(data_cleaned, scale. = TRUE)
+
+# Access the PCA results
+# Principal components
+pcs <- pca_result$x
+
+# Standard deviations of the principal components (square roots of the eigenvalues)
+pc_std <- pca_result$sdev
+
+# Proportion of variance explained by each principal component
+pc_var <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+
+# Cumulative proportion of variance explained
+cumulative_var <- cumsum(pc_var)
+
+# Access the loadings (coefficients) of the original variables on the principal components
+loadings <- pca_result$rotation
+```
+
+```{r} 
+pcs
+```
+
+
+```{r}
+# Perform PCA on the original data to know the variable assigned to each PC
+pca_result1 <- prcomp(numeric_data_cleaned_4_analysis)
+
+# Get the variable loadings of the principal components
+variable_loadings <- pca_result1$rotation
+
+# Get the variable names
+variable_names <- colnames(numeric_data_cleaned_4_analysis)
+
+# Identify variables for each principal component
+variable_names_by_component <- lapply(1:length(pca_result1$sdev), function(component) {
+  component_loadings <- variable_loadings[, component]
+  selected_variables <- variable_names[order(abs(component_loadings), decreasing = TRUE)[1:5]]  # Select the top 5 variables based on loadings (adjust as per your preference)
+  selected_variables
+})
+
+# Print the variable names for each principal component to the console
+for (i in 1:length(pca_result1$sdev)) {
+  cat("Variable names for Principal Component", i, ":", paste(variable_names_by_component[[i]], collapse = ", "), "\n")
+}
+
+```
+
+
+
+```{r}
+# Calculate cumulative variance explained
+cumulative_var <- cumsum(pca_result1$sdev^2) / sum(pca_result1$sdev^2)
+
+# Create a data frame for plotting
+plot_data <- data.frame(
+  PC = 1:length(cumulative_var),
+  CumulativeVariance = cumulative_var,
+  VariableNames = variable_names,
+  Variance = abs(pca_result1$rotation[, 1])
+)
+
+# Determine colors based on variance (you can customize this)
+plot_data$Color <- ifelse(plot_data$Variance > quantile(plot_data$Variance, 0.75), "High Variance", "Low Variance")
+
+# Create the plot using ggplot2
+base_plot <- ggplot(plot_data, aes(x = PC, y = CumulativeVariance, color = Color)) +
+  geom_line() +
+  geom_point(aes(size = Variance), shape = 19) +
+  geom_text(aes(label = VariableNames, size = Variance), nudge_y = 0.002, check_overlap = TRUE) +
+  labs(title = "Cumulative Variance Explained", x = "Principal Component", y = "Cumulative Variance Explained") +
+  scale_size_continuous(range = c(3, 10)) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+# Convert ggplot to an interactive plot using plotly
+interactive_plot <- ggplotly(base_plot, tooltip = c("VariableNames", "Variance"))
+
+# Display the interactive plot
+interactive_plot
+
+```
+
+```{r}
+# Calculate cumulative variance explained
+cumulative_var <- cumsum(pca_result1$sdev^2) / sum(pca_result1$sdev^2)
+
+# Create a data frame for plotting
+plot_data <- data.frame(
+  PC = 1:length(cumulative_var),
+  CumulativeVariance = cumulative_var,
+  VariableNames = variable_names,
+  Variance = abs(pca_result1$rotation[, 1])
+)
+
+# Determine colors based on variance (you can customize this)
+plot_data$Color <- ifelse(plot_data$Variance > quantile(plot_data$Variance, 0.75), "High Variance", "Low Variance")
+
+# Print variable names with high variance
+high_variance_names <- plot_data$VariableNames[plot_data$Variance > quantile(plot_data$Variance, 0.75)]
+cat("Variable names with high variance:\n")
+cat(high_variance_names, sep = ", ")
+
+```
+
+
+# Principal Component 1: overall_survival_months, tumor_size, age_at_diagnosis, lymph_nodes_examined_positive, nottingham_prognostic_index 
+
+# Principal Component 2 : tumor_size, lymph_nodes_examined_positive, age_at_diagnosis, overall_survival_months,
+
+
+```{r}
+# Create a data frame to store the matches using shiny
+matches_df <- data.frame(
+  Principal_Component = 1:length(pca_result1$sdev),
+  Variable_Matches = sapply(variable_names_by_component, paste, collapse = ", ")
+)
+
+# Format the table using kableExtra
+table <- kable(matches_df, "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+# Display the table
+print(table)
+
+```
+
+# Performing Dimensionality reduction techniques helps to point out potential biomarkers in a dataset, especially in cases of this dataset which contains a large number of features (high dimensionality).
+
+
+```{r}
+# Selecting the important variables along with age_at_diagnosis and overall_survival first to fiftieth pca
+final_numerical_4analysis <- numeric_data_cleaned_4_analysis %>%
+  select("overall_survival_months","tumor_size", "age_at_diagnosis", "lymph_nodes_examined_positive", "nottingham_prognostic_index","overall_survival",
+"mmp7", "bmpr1b", "aph1b", "mutation_count", "hsd17b11", "kmt2c", "map2k2", "setd1a",
+"chek1", "ccne1", "aurka", "cdc25a", "acvrl1", "foxo1", "dab2", "adgra2", "ccnd2",
+"cir1", "smad5", "aph1a", "pik3ca", "numbl", "hdac9", "myh9", "bmpr2", "smad3", "dtx2",
+"ncoa3", "stat1", "klrg1", "nr2f1", "ctbp2", "hes1", "hsd3b7", "mapk14", "apaf1", "large1",
+"kit", "asxl2", "hsd17b7", "ddc", "ctcf", "chd1", "utrn", "rbpj", "akap9",
+"mmp19", "map3k5", "agtr2", "kdm5a", "itch", "bcl2l1", "mapk3", "slc29a1", "fgfr1",
+"tulp4", "cdk2", "ptk2", "cdk4", "nrarp", "ubr5", "ncor1", "nf1", "herc2", "prkcz",
+"rassf1", "hsd17b14", "dnah2", "dtx3", "smarcc1", "cdh1", "sdc4", "hes4", "taf1", "maml1",
+"cul1", "lfng", "notch3", "pbrm1", "jag1", "setd2", "mlst8", "abcc1", "hes6", "ncstn",
+"gdf11", "hsd17b3", "mtor", "nfkb1", "lamb3", "cxcl8", "st7", "mmp12", "palb2",
+"smarcb1", "chek2", "rps6kb1", "hdac1", "hsd17b1", "cyp3a5", "wwox", "tgfbr3",
+"folr1", "cdkn2a", "tubb4b", "ugt2b7", "ugt2b15", "notch2", "eif4ebp1", "smad6", "siah1",
+"mdm2", "aff2", "vegfb", "inha", "mmp24", "tbx3", "braf", "nrg3", "kdr", "col22a1",
+"hes5", "cyp3a43", "tubb4a", "men1", "tp53", "ugt2b17", "cyp17a1", "arid1b", "slco1b3",
+"wfdc2", "prr16", "e2f1", "mapk12", "erbb2", "jag2", "terc", "inhba", "sik2", "ryr2",
+"pdgfb", "csf1", "diras3", "tg", "tgfb1", "hsd17b13", "hist1h2bc", "bad", "usp9x",
+"mapk8", "stmn2", "birc6", "cyp3a4", "cyp3a7", "arl11", "bmp15", "cohort","chemotherapy","radio_therapy","neoplasm_histologic_grade","hormone_therapy") 
+
+# Display the reframed data
+dim(numeric_data_cleaned_4_analysis)
+dim(final_numerical_4analysis)
+```
+
+#Categorical Variable Analysis
+#Exploratory Data Analysis
+```{r}
+# Given that the dataset is'data' from the csv file load initially
+categorical_data <- data[, sapply(data, function(x) is.factor(x) || is.character(x))]
+dim(categorical_data)
+
+```
+
+
+
+```{r}
+# Set a seed for reproducibility
+set.seed(123)
+# Defining function to plot bar charts for each variable in categorical_data
+plot_categorical_variable <- function(variable) {
+  ggplot(categorical_data, aes(x = !!sym(variable))) +
+    geom_bar(fill = "steelblue") +
+    labs(x = variable, y = "Count") +
+    ggtitle(paste("Bar Plot of", variable))
+}
+
+# Iterate over each column and plot the bar chart
+for (variable in colnames(categorical_data)) {
+  print(plot_categorical_variable(variable))
+}
+```
+
+
+
+```{r}
+# Checking for Na in categorical data
+is_any_Na <- anyNA(categorical_data)
+is_any_Na
+dim(categorical_data)
+```
+
+
+#Categorical Feature Extraction
+```{r}
+# Set a seed for reproducibility
+set.seed(123)
+# Perform MCA on 'categorical_data' (if not done already)
+mca_result <- MCA(categorical_data)
+
+# Calculate eigenvalues
+eigenvalues <- get_eigenvalue(mca_result)
+
+# Calculate proportion of variance explained
+variance_proportion <- eigenvalues / sum(eigenvalues)
+
+# Print eigenvalues
+print(eigenvalues)
+
+# Print variance proportion
+print(variance_proportion)
+
+# Summary statistics
+summary(mca_result)
+
+# Dimension description (Printing variable names in each dimension)
+dim_description <- dimdesc(mca_result)
+print(dim_description)
+
+```
+
+#In MCA, the dimensions are constructed to capture relationships between categorical variables, and the "R2" values can be understood as a measure of the goodness of fit for each variable in the corresponding dimension. Variables with higher "R2" values are better represented by that dimension. While the "p.value" is a measure of the significance of the association between the variables and the dimensions. A low "p.value" indicates that the variable is significantly associated with the dimension.
+
+#Based on the output, significant portion of the categorical variables have very high R2 values (close to 1), which implies a strong association with the response variable. Additionally, most of the p-values are extremely close to zero, indicating that the relationships are statistically significant.
+#Each dimension (Dim 1,2,3...) in MCA represents a linear combination of the original variables that captures the most significant patterns of association in the data.Dim.1 represents the dimension that explains the largest amount of variability in the dataset.
+
+
+#In the case of Mac Factor Maps, It show that "dim1" explains 0.61% of the total variability, while "dim2" explains 0.47% of the total variability. This means that "dim1" captures a slightly higher proportion of the variability in the data compared to "dim2". However, it's important to note that these percentages are relatively low, indicating that the dimensions may not explain a large amount of the overall variability in the outcome of the survival.
+
+# The ANOVA is used to assess whether there are any statistically significant differences in the means of a continuous dependent variable, among different groups defined by the categorical variable.
+#The R-squared value represents the proportion of variation in the dependent variable
+#In the table, all the R-squared values are very close to 1 (e.g., 0.9999142, 0.9999038, 0.9999027, etc.), suggesting that the gene mutation status is highly associated with the variation in the dependent variable. 
+#this suggests that the gene mutation status has a strong and statistically significant association with the dependent variable, and the differences observed among the groups are not likely due to random chance.
+
+#this data seems to provide valuable insights into the associations between genetic mutations, clinical variables, and breast cancer subtypes. It can be used to identify potential biomarkers, understand disease mechanisms, and predict patient outcomes based on genetic and clinical profiles.
+
+```{r}
+# Selecting the important variables along with age_at_diagnosis and overall_survival
+final_categorical_4analysis <- categorical_data %>%
+  select("pik3ca_mut", "muc16_mut", "kmt2c_mut", "syne1_mut", "gata3_mut", "map3k1_mut", "ryr2_mut", "dnah5_mut", "herc2_mut", "akap9_mut", "birc6_mut", "utrn_mut", "tbx3_mut", "atr_mut", "thada_mut", "ncor1_mut", "stab2_mut", "runx1_mut", "nf1_mut", "lamb3_mut", "arid1b_mut", "shank2_mut", "ptprd_mut", "setd2_mut", "afdn_mut", "alk_mut", "fanca_mut", "myo3a_mut", "apc_mut","asxl1_mut", "fancd2_mut", "kdm6a_mut", "ctnna3_mut", "gldc_mut", "brca2_mut", "arid2_mut", "aff2_mut", "ptpn22_mut", "ttyh1_mut", "map3k13_mut", "rpgr_mut", "prkce_mut", "cdkn2a_mut", "foxo1_mut", "rasgef1b_mut", "smarcb1_mut", "smad4_mut", "ahnak2_mut", "ahnak_mut", "dnah11_mut", "tg_mut", "col12a1_mut", "ep300_mut", "pik3r1_mut", "foxo3_mut", "kdm3a_mut", "setdb1_mut", "egfr_mut", "map3k10_mut", "smarcc2_mut", "nek1_mut", "smad4_mut", "sik1_mut", "prkcq_mut", "dcaf4l2_mut", "stk11_mut", "sik2_mut", "flt3_mut", "nrg3_mut", "prkg1_mut", "tp53_mut", "cdh1_mut", "kmt2d_mut", "ush2a_mut", "col6a3_mut", "arid1a_mut", "lama2_mut", "ncor2_mut", "col22a1_mut", "ncor1_mut", "usp9x_mut", "setd1a_mut", "thsd7a_mut", "rb1_mut", "asxl1_mut", "taf1_mut", "jak1_mut", "erbb4_mut", "dcaf4l2_mut", "ctnna1_mut", "sgcd_mut", "akt1_mut", "integrative_cluster", "oncotree_code", "cancer_type_detailed", "er_status", "tumor_other_histologic_subtype")
+
+# Display the reframed data
+dim(categorical_data)
+dim(final_categorical_4analysis)
+
+```
+
+```{r}
+# Verify data frame and column name
+if ("overall_survival_months" %in% names(final_numerical_4analysis)) {
+  # Subset the column using square brackets
+  overall_survival_monthsST <- final_numerical_4analysis[["overall_survival_months"]]
+  
+  # Check if the column contains data
+  if (length(overall_survival_monthsST) == 0) {
+    print("The column 'overall_survival_months' is empty.")
+  } else {
+    # Display summary of the column
+    summary(overall_survival_monthsST)
+  }
+} else {
+  print("The column 'overall_survival_months' does not exist in the data frame.")
+}
+
+
+```
+# Merged horizontally by concatenating their columns side by side,  "concatenation" or "column-wise concatenation."
+
+
+```{r}
+# Merging data when both datasets have the same number of rows final_numerical_4analysis and final_categorical_4analysis
+dimenReduc_datasetCatNum <- cbind(final_numerical_4analysis, final_categorical_4analysis)
+original_datasetCatNum <- cbind(categorical_data,numeric_data_cleaned_4_analysis)
+
+```
+
+
+```{r}
+#Merging data both overall_survival_monthsST merged_datasetCat
+merged_datasetCat <- cbind(overall_survival_monthsST, final_categorical_4analysis)
+
+```
+
+
+
+```{r}
+#Distinguishing the Dimension
+merged_datasetCat
+dim(dimenReduc_datasetCatNum)
+dim(original_datasetCatNum)
+
+```
+
+
+```{r}
+# Export the data frame to a CSV file
+write.csv(merged_datasetCat, file = "merged_datasetCat.csv", row.names = FALSE)
+write.csv(dimenReduc_datasetCatNum, file = "dimenReduc_datasetCatNum.csv", row.names = FALSE)
+write.csv(original_datasetCatNum, file = "original_datasetCatNum.csv", row.names = FALSE)
+
+```
+
+```{r}
+#Visualizing data.
+merged_datasetCat
+dimenReduc_datasetCatNum
+original_datasetCatNum
+```
+
+

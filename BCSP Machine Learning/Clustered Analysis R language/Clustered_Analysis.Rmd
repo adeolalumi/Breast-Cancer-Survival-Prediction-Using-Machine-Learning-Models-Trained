@@ -1,0 +1,344 @@
+---
+title: "Cluster_Analysis"
+author: "Adeola Odunewu 2225757"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Featuretools: This library is designed for deep feature creation from any features we have, especially from temporal and relation features. 
+library(tidyverse)
+library(ggplot2)
+library(survival)
+library(corrplot)
+library(dplyr)
+library(readr)
+library(stringr)
+library(gridExtra)
+library(car)
+library(cluster)
+library(reshape2)
+library(Hmisc)
+library(dbscan)
+library(DescTools)
+library(stats)
+library(factoextra)
+library(FactoMineR)
+library(fpc)
+library(igraph)
+library(plotly)
+library(caret)
+library(kableExtra)
+library(shiny)
+```
+
+
+```{r}
+#Loading Clean Data
+data = read.csv("original_datasetCatNum.csv", stringsAsFactors = FALSE)
+```
+
+
+```{r}
+#Exploring Data
+head(data)
+dim(data)
+```
+
+
+```{r}
+# Identify columns to be converted to factors
+factor_cols <- sapply(data, function(x) is.character(x))
+
+# Convert identified columns to factors
+data[factor_cols] <- lapply(data[factor_cols], as.factor)
+
+#Taking care of ordinal varaible to factors
+# Iterate over each column in the dataset
+for (col in names(data)) {
+  # Check if the column is a factor and has more than two levels
+  if (is.ordered(data[[col]]) && length(levels(data[[col]])) > 2) {
+    # Convert the ordinal variable to a factor with default levels and labels
+    data[[col]] <- factor(data[[col]])
+  }
+}
+
+```
+
+```{r}
+# Collecting numerical data.
+numeric_data <- data %>%
+  select_if(is.numeric)
+
+numeric_data
+```
+
+
+```{r}
+# Perform PCA
+# Set a seed for reproducibility
+set.seed(123)
+
+pca_result <- prcomp(numeric_data, scale. = TRUE)
+
+# Access the PCA results
+# Principal components
+pcs <- pca_result$x
+
+# Standard deviations of the principal components (square roots of the eigenvalues)
+pc_std <- pca_result$sdev
+
+# Proportion of variance explained by each principal component
+pc_var <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+
+# Cumulative proportion of variance explained
+cumulative_var <- cumsum(pc_var)
+
+# Access the loadings (coefficients) of the original variables on the principal components
+loadings <- pca_result$rotation
+```
+
+
+```{r}
+# Set a seed for reproducibility
+set.seed(123)
+
+# Define the UI
+ui <- fluidPage(
+  titlePanel("Top Contributing Variables to Principal Components"),
+  mainPanel(
+    dataTableOutput("table_output")
+  )
+)
+
+# Define the server
+server <- function(input, output, session) {
+  
+  pca_results <- reactive({
+    # Use the results from your earlier PCA
+    pcs <- pca_result$x
+    loadings <- pca_result$rotation
+    
+    variable_names <- colnames(numeric_data)
+    
+    variable_names_by_component <- lapply(1:ncol(pcs), function(component) {
+      component_loadings <- loadings[, component]
+      selected_variables <- variable_names[order(abs(component_loadings), decreasing = TRUE)[1:5]]
+      paste(selected_variables, collapse = ", ")
+    })
+    
+    pca_table <- data.frame(
+      Principal_Component = 1:ncol(pcs),
+      Variable_Matches = sapply(variable_names_by_component, paste, collapse = ", ")
+    )
+    
+    pca_table
+  })
+  
+  output$table_output <- renderDataTable({
+    pca_results()
+  })
+  
+  # Observe changes in the table and close the Shiny app
+  observeEvent(input$table_output_close, {
+    stopApp()
+  })
+}
+
+# Run the app
+shinyApp(ui, server)
+
+
+```
+
+#Note close the Shingy server then continue, ignore the error message (Error : object 'session' not found)
+
+```{r}
+# Create a data frame for plotting with hovertext
+plot_data <- data.frame(
+  PC = 1:length(cumulative_var),
+  CumulativeVariance = cumulative_var,
+  VariableNames = colnames(numeric_data),  # Extract variable names from numeric_data
+  Variance = abs(pca_result$rotation[, 1]),
+  HoverText = colnames(numeric_data)  # Use variable names as hovertext
+)
+
+# Determine colors based on variance (you can customize this)
+plot_data$Color <- ifelse(plot_data$Variance > quantile(plot_data$Variance, 0.75), "High Variance", "Low Variance")
+
+# Create the plot using ggplot2
+base_plot <- ggplot(plot_data, aes(x = PC, y = CumulativeVariance, color = Color)) +
+  geom_line() +
+  geom_point(aes(size = Variance), shape = 19) +
+  labs(title = "Cumulative Variance Explained", x = "Principal Component", y = "Cumulative Variance Explained") +
+  scale_size_continuous(range = c(3, 10)) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+# Convert ggplot to an interactive plot using plotly
+interactive_plot <- ggplotly(base_plot, tooltip = c("VariableNames", "Variance", "HoverText"))
+
+# Display the interactive plot
+interactive_plot
+
+
+```
+
+
+```{r}
+# Set a seed for reproducibility
+set.seed(123)
+
+# Creating an array to store the WCSS values
+wcss <- vector()
+
+# Trying different values of k (number of clusters)
+for (k in 1:10) {
+  kmeans_model <- kmeans(pcs, centers = k)
+  wcss[k] <- kmeans_model$tot.withinss
+}
+
+# Plotting the elbow curve
+plot(1:10, wcss, type = "b", pch = 19, frame = FALSE, xlab = "Number of Clusters", ylab = "WCSS", main = "Elbow Method")
+
+# Find the "elbow point" by detecting the change in slope
+diffs <- diff(wcss)
+elbow_point <- which(diffs == min(diffs)) + 1
+cat("The optimal number of clusters (elbow point) is:", elbow_point, "\n")
+
+```
+
+
+```{r}
+# Set a seed for reproducibility
+set.seed(123)
+
+# Define a range of cluster numbers to try
+num_clusters_range <- 2:10
+
+# Initialize variables to store results
+best_num_clusters <- 0
+best_silhouette_score <- -1
+
+# Iterate through different numbers of clusters
+for (num_clusters in num_clusters_range) {
+  # Apply K-Means clustering algorithm
+  kmeans_result <- kmeans(pcs, centers = num_clusters)
+  
+  # Get the cluster assignments for each data point
+  cluster_labels <- kmeans_result$cluster
+  
+  # Calculate the silhouette score
+  silhouette_avg <- silhouette(cluster_labels, dist(pcs))
+  
+  # Calculate the mean silhouette score
+  mean_silhouette_score <- mean(silhouette_avg[, "sil_width"])
+  
+  # Print the mean silhouette score for the current number of clusters
+  cat("Number of clusters:", num_clusters, " - Mean Silhouette Score:", mean_silhouette_score, "\n")
+  
+  # Update best score and number of clusters if necessary
+  if (mean_silhouette_score > best_silhouette_score) {
+    best_silhouette_score <- mean_silhouette_score
+    best_num_clusters <- num_clusters
+  }
+}
+
+# Print the best number of clusters and its corresponding silhouette score
+cat("Best number of clusters:", best_num_clusters, " - Best Silhouette Score:", best_silhouette_score, "\n")
+
+
+```
+ 
+
+
+```{r}
+# Set a seed for reproducibility
+set.seed(123)
+
+# Calculate the distance matrix
+dist_matrix <- dist(pcs)
+
+# Perform hierarchical clustering using Ward's method
+hclust_result <- hclust(dist_matrix, method = "ward.D2")
+
+# Plot the dendrogram
+plot(hclust_result, main = "Hierarchical Clustering Dendrogram")
+
+# Cut the dendrogram to get cluster assignments for k = 2
+num_clusters <- 2
+clusters <- cutree(hclust_result, k = num_clusters)
+
+# Plot the data points with their respective cluster colors
+plot(pcs, col = clusters, pch = 16, main = "Hierarchical Clustering (k = 2)", xlab = "Group 1", ylab = "Grou 2")
+legend("topright", legend = paste("Cluster", 1:num_clusters), col = 1:num_clusters, pch = 16)
+
+
+```
+
+
+```{r}
+# Perform Cluster Profiling using the cluster labels
+## Setting seed for reproducibility
+set.seed(123)
+
+# Retrieve the first two principal components
+pcs_2d <- as.data.frame(pca_result$x[, 1:2])
+
+# Perform k-means clustering with k set to 2 on the first two principal components
+k <- 2
+km <- kmeans(pcs_2d, k, nstart = 50, algorithm = "Lloyd", iter.max = 5000)
+
+# Retrieve the cluster assignments
+cluster_labels <- km$cluster
+
+# Print the cluster labels
+print(cluster_labels)
+
+# Perform further analysis or visualization using the cluster labels
+# Cluster Profiling
+cluster_means <- aggregate(pcs, by = list(cluster = cluster_labels), FUN = mean)
+print(cluster_means)
+
+# Cluster Visualization
+par(mfrow = c(2, 2), mar = c(2, 2, 2, 2))  # Set up a 2x2 grid for subplots with smaller margins
+
+# Iterate through combinations of variables for visualization
+for (i in 1:4) {
+  for (j in (i + 1):4) {
+    plot(pcs[, i], pcs[, j], col = cluster_labels, pch = 19,
+         main = paste("P Component", i, "vs P Component", j),
+         xlab = paste("PC", i), ylab = paste("PC", j))
+    
+    # Add legend
+    legend("topright", legend = levels(factor(cluster_labels)),
+           col = 1:k, pch = 19, title = "Clusters")
+  }
+}
+```
+
+
+# Cluster Formation: The fact that the data points are grouped differently into two clusters on the scatter plot of PCA 1 (PC1) and PCA 2 (PC2) suggests that these two principal components are capturing important variance that separates the data points into these distinct groups. Separation and Variability: The separation between the clusters indicates that PC1 and PC2 are able to differentiate between groups in your data. Outliers: The presence of data points that are far from the main clusters could be indicative of outliers or unique data points. PC2 and PC3 also PC2 and PC4 exhibit distinct patterns, and display varying characteristics that partially overlap.
+
+# The fact that the clusters mix in the higher-dimensional space (PC5, PC6...) indicates that these components may not contribute significantly to the clustering structure or may introduce more noise. It is common for the higher-order principal components to contain less information or explain less variance in the data compared to the first few principal components.
+
+
+
+```{r}
+# Cluster Profiling
+cluster_means <- aggregate(pcs, by = list(cluster = cluster_labels), FUN = mean)
+print(cluster_means)
+
+# Cluster Visualization using fviz_cluster
+fviz_cluster(km, data = pcs_2d, geom = "point", ellipse.type = "convex", ellipse.level = 0.95)
+
+
+```
+# These clusters represent different groups in the study, it infer that Cluster 1 represents a group with more extreme values in certain features, while Cluster 2 represents a group with more moderate values. the clusters are well-separated and distinct from each other, it indicates that the clustering algorithm has successfully identified different groups in the data. note larger convex hull indicates that the cluster covers a broader region.
+
+
+
